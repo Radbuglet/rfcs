@@ -11,9 +11,9 @@ Implements a mechanism to implicitly pass context values to deeply-nested functi
 # Motivation
 [motivation]: #motivation
 
-Currently, to pass context values to a deeply nested function, a Rustacean has three options.
+Currently, to pass context values to a deeply nested function, a Rustacean has three options:
 
-Most intuitively, they could manually pass that context along in a parameter...
+First, they could manually pass that context along in a parameter...
 
 ```rust
 fn foo(database: &Database, ...) {
@@ -29,7 +29,7 @@ fn baz(database: &Database, ...) {
 }
 ```
 
-This works but results in tedious refactors every time the user wants to add a parameter deep in the call graph since they have to adjust each ancestor function's signature. Additionally, these signatures can quickly become unwieldy as users pass more and more individual context elements since each element in the context requires a new parameter.
+This works but results in tedious refactors every time they want to add a parameter deep in the call graph since they have to adjust each ancestor function's signature. Additionally, these signatures can quickly become unwieldy as users pass more and more individual context elements since each element in the context requires a new parameter to be passed along.
 
 ```rust
 fn foo(
@@ -60,7 +60,7 @@ fn baz(
 }
 ```
 
-To get around these issues, a user may quickly think of using the second option: bundle up their context in a "bundle of context" object...
+To get around these issues, a user may think of a second option: bundle up their context in a "bundle of context" object...
 
 ```rust
 struct Cx<'a> {
@@ -83,7 +83,7 @@ fn baz(cx: &Cx<'_>, ...) {
 }
 ```
 
-Alternatively, they might think of the third option: using thread-local storage.
+Alternatively, they might think of a third option: using thread-local storage.
 
 ```rust
 thread_local! {
@@ -108,14 +108,14 @@ fn bar(...) {
 
 fn baz(...) {
     use_database(|db| {
-        // We have access to the database!  
+        // We have access to the database!
     });
 }
 ```
 
 Unfortunately, while solutions two and three scale very well, they have one big problem: they do not play nicely with context values which need to be passed mutably.
 
-As an example of such a context value, let's look at `generational_arena`'s `Arena` object. An `Arena`, in that context, is a structure which provides an efficient mapping from object handles to object values which can be indexed like a regular hash map.
+As an example of such a context value, let's look at `generational_arena`'s `Arena` object. An `Arena`, in that context, is a structure which provides an efficient mapping from object handles to object values and can be indexed like a regular hash map.
 
 ```rust
 use generational_arena::{Arena, Index};
@@ -127,7 +127,7 @@ struct Person {
 
 fn main() {
     let mut people = Arena::new();
-  
+
     let alice = people.insert(Person {
         name: "alice".to_string(),
         best_friends: Vec::new(),
@@ -136,7 +136,7 @@ fn main() {
         name: "bob".to_string(),
         best_friends: Vec::new(),
     });
-  
+
     people[alice].best_friends.push(bob);
     people[bob].best_friends.push(alice);
 
@@ -145,21 +145,25 @@ fn main() {
 }
 ```
 
-This pattern is fantastic because it provides a mechanism for creating aliased references whose values can still be accessed mutably. Unfortunately, to be able to access the arena mutably, you need a mutable reference to it! And, because a given object handle may need to be fetched deep down in the call stack, it can quickly become one of those pesky "mutably-referenced context values."
+This pattern is fantastic because it provides a mechanism for creating aliased references whose values can still be accessed mutably. In the example above, we can mutate both `alice` and `bob`, despite the fact that there are two references to them: the reference on the stack and the references in their best friend's `best_friends` vector.
 
-We may think of using our second solution—the bundle solution—to work around that problem: just pass the bundle mutably instead of immutably...
+Unfortunately, to be able to access the arena mutably, you need a mutable reference to it! And, because a given object handle may need to be fetched deep down in the call stack, it can quickly become one of those pesky "mutably-referenced context values."
+
+We may think of using our second solution—the "bundle of context" solution—to work around that problem. What's the worst that could happen if we just pass the bundle mutably instead of immutably...
 
 ```rust
 use std::collections::HashSet;
 
 use generational_arena::{Arena, Index};
 
+// Here's our bundle.
 struct Context {
     groups: Arena<SocialGroup>,
     people: Arena<Person>,
     pets: Arena<Pet>,
 }
 
+// Here's our objects...
 struct SocialGroup {
     name: String,
     alliances: HashSet<Index>, // handle to `SocialGroup`
@@ -178,6 +182,7 @@ struct Pet {
     petted_by: HashSet<Index>, // handle to `Person`
 }
 
+// And here's our functions on them...
 fn add_alliance(cx: &mut Context, group_1: Index, group_2: Index) {
     // If you want a stable alliance, everyone is going to have to be
     // friends with everyone else...
@@ -227,7 +232,19 @@ fn pet_that_animal(cx: &mut Context, person: Index, pet: Index) {
 }
 ```
 
-...but that doesn't work and Rust will rightfully yell at us!
+In this example, when we call `add_alliance`, we...
+
+- **Immutably borrow two `groups`** to iterate over their members.
+  - Call `add_friends` for each pair of members.
+    - **Mutably borrow `people`** to mark the two members as friends.
+    - **Immutably borrow `people`** to iterate over their pets.
+      - Call `pet_that_animal` for each pet.
+        - **Mutably borrow `pets`** to update the `petted_by` set.
+        - **Immutably borrow `groups`, `people`, and `pets`** to print out an informative message.
+
+All three `Arena` instances have to be passed to every function in this program since the deepest function, `pet_that_animal` requires immutable references to all of them. However, despite all this interwoven access, the code should theoretically still compile since we never borrow something mutably and immutably at the same time.
+
+...but that doesn't work and Rust will unfortunately remind us of the reality that:
 
 ```
 error[E0502]: cannot borrow `*cx` as mutable because it is also borrowed as immutable
@@ -267,7 +284,7 @@ error[E0502]: cannot borrow `*cx` as mutable because it is also borrowed as immu
 
 The problem is that we're holding a reference to an arena while we pass the remaining context down the function chain, causing aliased borrows that Rust really doesn't like.
 
-But this code is safe! If we expand it into the manual passing strategy, the code compiles perfectly:
+But this code is acceptable! If we expand it into the manual passing strategy, the code compiles perfectly:
 
 ```rust
 fn add_alliance(
@@ -337,12 +354,12 @@ fn pet_that_animal(
 }
 ```
 
-...but now we have to deal with unwieldy signatures and the tedious refactors they oftentimes entail.
+Although bundles of context and global context variables are wonderful techniques for simplifying context passing, for scenarios like this, the best we can do in current Rust is pass each parameter manually and deal with unwieldy signatures and the tedious refactors they oftentimes entail.
 
 # Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
-To solve this issue, this RFC proposes a new builtin macro to the standard library: `cap!`. `cap!`, short for capabilities, takes on several forms.
+To solve this pain-point, this RFC proposes a new builtin macro to the standard library: `cap!`. `cap!`, short for capabilities, takes on several forms:
 
 Its first form defines a new capability to which users can provide values...
 
