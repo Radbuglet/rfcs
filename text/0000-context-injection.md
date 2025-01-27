@@ -1165,9 +1165,105 @@ Note that there are some [open questions](#unresolved-questions) regarding the e
 
 ==TODO==
 
-### Handling Non-`'static Context
+### Miscellaneous Notes
 
-==TODO==
+This section contains various aspects of this feature I couldn't figure out where to stick in the RFC.
+
+First, one should note that, in its current form, context items must live for `'static` and cannot contain generic type parameters. The former restriction exists because we don't yet have a mechanism for defining existential lifetimes that live for some unknown time. The latter restriction exists because it is unclear how we'd support that feature.
+
+Since context items can contain dynamically sized types, we can emulate this in userland by defining a `trait` that looks like...
+
+```rust
+use std::ops::FnMut;
+
+trait MyContext {
+    fn get(&self, f: &mut dyn FnMut(&Vec<&u32>));
+
+    fn get_mut(&mut self, f: &mut dyn FnMut(&mut Vec<&u32>));
+}
+
+impl<'a> MyContext for Vec<&'a u32> {
+    fn get(&self, f: &mut dyn FnMut(&Vec<&u32>)) {
+        f(self)
+    }
+
+    fn get_mut(&mut self, f: &mut dyn FnMut(&mut Vec<&u32>)) {
+        f(self)
+    }
+}
+```
+
+...and “shifting out” the lifetime `'b` in `&'a (dyn MyContext + 'b)` into the reference's lifetime by transmuting the former type into `&'a (dyn MyContext + 'static)` with a function like this:
+
+```rust
+fn shift_out_context<'a, 'b>(
+    cx: &'a mut (dyn MyContext + 'b),
+) -> &'a mut (dyn MyContext + 'static) {
+    unsafe { &mut *(cx as *mut (dyn MyContext + 'b) as *mut (dyn MyContext + 'static)) }
+}
+```
+
+These traits could then be consumed as so:
+
+```rust
+#[context]
+static MY_CONTEXT: dyn MyContext;
+
+fn main() {
+    let mut my_cx = Vec::<&u32>::new();
+
+    let static MY_CONTEXT = shift_out_context(&mut my_cx);
+
+    consumer();
+}
+
+fn consumer() {
+    MY_CONTEXT.get_mut(&mut |vec| vec.clear());
+}
+```
+
+It would be fairly easy to create a stop-gap crate defining a `macro` to generate this pattern.
+
+Second, the current proposal does not have a syntax for tying a borrow of a context item to a lifetime parameter in the function. Indeed, context borrows from a context binder outside of the current function are not allowed to outlive the borrowing function. Hence, this is denied:
+
+```rust
+#[context]
+static MY_CONTEXT: u32;
+
+fn demo<'a>() -> &'a mut u32 {
+    &mut MY_CONTEXT
+}
+```
+
+This is fine because we can use bundles to achieve the same thing:
+
+```rust
+use std::context::{Bundle, unpack};
+
+#[context]
+static MY_CONTEXT: u32;
+
+fn demo<'a>(#[auto_arg] cx: Bundle<&'a mut MY_CONTEXT>) -> &'a mut u32 {
+    unpack!(cx => &mut MY_CONTEXT)
+}
+```
+
+Additionally, since the rule about outlived context being denied only applies to “borrows from a context binder *outside* of the current function,” if the `let static` binder is within the same function as the borrower, the restriction will be lifted.
+
+Hence, this is equally valid:
+
+```rust
+use std::context::Bundle;
+
+#[context]
+static MY_CONTEXT: u32;
+
+fn demo<'a>(#[auto_arg] cx: Bundle<&'a mut MY_CONTEXT>) -> &'a mut u32 {
+    let static ..cx;
+
+    &mut MY_CONTEXT
+}
+```
 
 ### Example: Making The Ultimate Smart-Pointer
 
